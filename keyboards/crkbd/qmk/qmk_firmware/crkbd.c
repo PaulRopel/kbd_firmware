@@ -1,4 +1,113 @@
+#include QMK_KEYBOARD_H
 #include "quantum.h"
+#include "debug.h"
+#include "print.h"
+#include "split_util.h"
+#include "gpio.h"
+#include "wait.h"
+#include "platforms/chibios/gpio.h"
+#include "platforms/chibios/vendors/RP/_pin_defs.h"
+#include <stdint.h>
+#include <stdbool.h>
+#include "config.h"
+#include "atomic_util.h"
+
+static uint32_t last_debug_time = 0;
+
+__attribute__((weak)) void keyboard_pre_init_user(void) {}
+__attribute__((weak)) void keyboard_post_init_user(void) {}
+
+static inline void setPinOutput_writeLow(pin_t pin) {
+    ATOMIC_BLOCK_FORCEON {
+        setPinOutput(pin);
+        writePinLow(pin);
+    }
+}
+
+static inline void setPinOutput_writeHigh(pin_t pin) {
+    ATOMIC_BLOCK_FORCEON {
+        setPinOutput(pin);
+        writePinHigh(pin);
+    }
+}
+
+static inline void setPinInputHigh_atomic(pin_t pin) {
+    ATOMIC_BLOCK_FORCEON {
+        setPinInputHigh(pin);
+    }
+}
+
+void keyboard_pre_init_kb(void) {
+    // Force debug to be enabled using the macro directly
+    debug_enable = true;
+    debug_matrix = true;
+    debug_keyboard = true;
+    
+    // Add direct console output that doesn't rely on debug_enable
+    xprintf("CRKBD: Console test message from keyboard_pre_init_kb\n");
+    xprintf("DEBUG: Debug enabled on %s side\n", is_keyboard_master() ? "master" : "slave");
+    
+    // Initialize split detection pin
+    setPinInputHigh_atomic(SPLIT_HAND_PIN);
+    xprintf("DEBUG: Split hand pin GP%d initialized\n", SPLIT_HAND_PIN);
+    wait_ms(1);
+
+    // Read split detection pin to determine if we're left or right
+    // SPLIT_HAND_PIN_HIGH_IS_LEFT is defined, so HIGH (1) = left side, LOW (0) = right side
+    bool is_left = readPin(SPLIT_HAND_PIN) == 1;  // HIGH (1) = left side with SPLIT_HAND_PIN_HIGH_IS_LEFT
+    xprintf("DEBUG: Split hand pin GP%d read: %lu (is_left: %d)\n", SPLIT_HAND_PIN, readPin(SPLIT_HAND_PIN), is_left);
+    xprintf("DEBUG: is_keyboard_left() reports: %d\n", is_keyboard_left());
+    xprintf("DEBUG: is_keyboard_right() reports: %d\n", !is_keyboard_left());
+
+    if (is_left) {
+        xprintf("DEBUG: Left side detected, configuring TX:GP%d RX:GP%d\n", SERIAL_USART_TX_PIN_LEFT, SERIAL_USART_RX_PIN_LEFT);
+        setPinOutput_writeHigh(SERIAL_USART_TX_PIN_LEFT);
+        setPinInputHigh_atomic(SERIAL_USART_RX_PIN_LEFT);
+        xprintf("DEBUG: Left side UART pins configured\n");
+    } else {
+        xprintf("DEBUG: Right side detected, configuring TX:GP%d RX:GP%d\n", SERIAL_USART_TX_PIN_RIGHT, SERIAL_USART_RX_PIN_RIGHT);
+        setPinOutput_writeHigh(SERIAL_USART_TX_PIN_RIGHT);
+        setPinInputHigh_atomic(SERIAL_USART_RX_PIN_RIGHT);
+        xprintf("DEBUG: Right side UART pins configured\n");
+    }
+
+    xprintf("DEBUG: Keyboard pre-init complete on %s side\n", is_keyboard_master() ? "master" : "slave");
+    keyboard_pre_init_user();
+}
+
+void keyboard_post_init_kb(void) {
+    // Add direct console output that doesn't rely on debug_enable
+    xprintf("CRKBD: Console test message from keyboard_post_init_kb\n");
+    
+    xprintf("DEBUG: Keyboard post-init starting on %s side...\n", is_keyboard_master() ? "master" : "slave");
+    keyboard_post_init_user();
+    xprintf("DEBUG: Keyboard post-init complete on %s side\n", is_keyboard_master() ? "master" : "slave");
+}
+
+void housekeeping_task_kb(void) {
+    // Add direct console output that doesn't rely on debug_enable
+    static uint32_t last_print = 0;
+    if (timer_elapsed32(last_print) > 5000) {  // Print every 5 seconds
+        // Force debug to be enabled using the macro directly
+        debug_enable = true;
+        debug_matrix = true;
+        debug_keyboard = true;
+        
+        xprintf("CRKBD: Console test message from housekeeping_task_kb\n");
+        xprintf("DEBUG: This is a test debug message from housekeeping_task_kb\n");
+        last_print = timer_read32();
+    }
+    
+    // Print debug message every 5 seconds
+    if (timer_elapsed32(last_debug_time) > 5000) {
+        xprintf("DEBUG: Keyboard is alive - %lu ms\n", timer_read32());
+        xprintf("DEBUG: Split hand pin GP%d read: %lu\n", SPLIT_HAND_PIN, readPin(SPLIT_HAND_PIN));
+        xprintf("DEBUG: is_keyboard_left(): %d, is_keyboard_master(): %d\n", 
+                is_keyboard_left(), 
+                is_keyboard_master());
+        last_debug_time = timer_read32();
+    }
+}
 
 #ifdef OLED_ENABLE
 oled_rotation_t oled_init_kb(oled_rotation_t rotation) {
@@ -121,6 +230,11 @@ bool oled_task_kb(void) {
 }
 
 bool process_record_kb(uint16_t keycode, keyrecord_t *record) {
+    // If console is enabled, it will print the matrix position and status of each key pressed
+    #ifdef CONSOLE_ENABLE
+        uprintf("KL: kc: 0x%04X, col: %2u, row: %2u, pressed: %u\n", 
+                keycode, record->event.key.col, record->event.key.row, record->event.pressed);
+    #endif 
     if (record->event.pressed) {
         set_keylog(keycode, record);
     }

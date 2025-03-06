@@ -3,16 +3,39 @@
 #include "debug.h"
 #include "print.h"
 #include "split_util.h"
+#include "transport.h"
 #include "gpio.h"
 #include "wait.h"
 #include "platforms/chibios/gpio.h"
 #include "platforms/chibios/vendors/RP/_pin_defs.h"
 #include <stdint.h>
 #include <stdbool.h>
+#include <stdarg.h>  // For va_list, va_start, va_end
 #include "config.h"
 #include "atomic_util.h"
 
-static uint32_t last_debug_time = 0;
+// Force even more reliable (but slower) settings
+#define SERIAL_USART_FULL_DUPLEX
+
+// Buffer for pre-init logs
+#define PRE_INIT_LOG_SIZE 1024
+static char pre_init_log_buffer[PRE_INIT_LOG_SIZE];
+static int pre_init_log_pos = 0;
+
+// Helper function to safely append to pre-init log buffer
+static void append_pre_init_log(const char* format, ...) {
+    if (pre_init_log_pos >= PRE_INIT_LOG_SIZE - 1) return; // Buffer full
+    
+    va_list args;
+    va_start(args, format);
+    int remaining = PRE_INIT_LOG_SIZE - pre_init_log_pos;
+    int written = vsnprintf(&pre_init_log_buffer[pre_init_log_pos], remaining, format, args);
+    va_end(args);
+    
+    if (written > 0 && written < remaining) {
+        pre_init_log_pos += written;
+    }
+}
 
 __attribute__((weak)) void keyboard_pre_init_user(void) {}
 __attribute__((weak)) void keyboard_post_init_user(void) {}
@@ -38,174 +61,277 @@ static inline void setPinInputHigh_atomic(pin_t pin) {
 }
 
 void keyboard_pre_init_kb(void) {
-    // Force debug to be enabled using the macro directly
+    // Initialize debug output first
     debug_enable = true;
     debug_matrix = true;
     debug_keyboard = true;
     
-    // Add direct console output that doesn't rely on debug_enable
-    xprintf("CRKBD: Console test message from keyboard_pre_init_kb\n");
-    xprintf("DEBUG: Debug enabled on %s side\n", is_keyboard_master() ? "master" : "slave");
-    
-    // Initialize split detection pin
-    setPinInputHigh_atomic(SPLIT_HAND_PIN);
-    xprintf("DEBUG: Split hand pin GP%d initialized\n", SPLIT_HAND_PIN);
-    wait_ms(1);
-
-    // Read split detection pin to determine if we're left or right
-    // SPLIT_HAND_PIN_HIGH_IS_LEFT is defined, so HIGH (1) = left side, LOW (0) = right side
-    bool is_left = readPin(SPLIT_HAND_PIN) == 1;  // HIGH (1) = left side with SPLIT_HAND_PIN_HIGH_IS_LEFT
-    xprintf("DEBUG: Split hand pin GP%d read: %lu (is_left: %d)\n", SPLIT_HAND_PIN, readPin(SPLIT_HAND_PIN), is_left);
-    xprintf("DEBUG: is_keyboard_left(): %d, is_keyboard_master(): %d\n", is_keyboard_left(), is_keyboard_master());
-    
-    // Configure UART pins for vendor driver
-    if (is_keyboard_left()) {
-        xprintf("DEBUG: Left side detected, configuring TX:GP%d RX:GP%d\n", SERIAL_USART_TX_PIN_LEFT, SERIAL_USART_RX_PIN_LEFT);
-        
-        // Configure UART pins for left side
-        setPinOutput_writeHigh(SERIAL_USART_TX_PIN_LEFT);
-        setPinInputHigh_atomic(SERIAL_USART_RX_PIN_LEFT);
-        
-        // Verify pin states after configuration
-        xprintf("DEBUG: Left TX pin GP%d state after config: %lu\n", SERIAL_USART_TX_PIN_LEFT, readPin(SERIAL_USART_TX_PIN_LEFT));
-        xprintf("DEBUG: Left RX pin GP%d state after config: %lu\n", SERIAL_USART_RX_PIN_LEFT, readPin(SERIAL_USART_RX_PIN_LEFT));
-        
-        xprintf("DEBUG: Left side UART pins configured\n");
-    } else {
-        xprintf("DEBUG: Right side detected, configuring TX:GP%d RX:GP%d\n", SERIAL_USART_TX_PIN_RIGHT, SERIAL_USART_RX_PIN_RIGHT);
-        
-        // Configure UART pins for right side
-        setPinOutput_writeHigh(SERIAL_USART_TX_PIN_RIGHT);
-        setPinInputHigh_atomic(SERIAL_USART_RX_PIN_RIGHT);
-        
-        // Verify pin states after configuration
-        xprintf("DEBUG: Right TX pin GP%d state after config: %lu\n", SERIAL_USART_TX_PIN_RIGHT, readPin(SERIAL_USART_TX_PIN_RIGHT));
-        xprintf("DEBUG: Right RX pin GP%d state after config: %lu\n", SERIAL_USART_RX_PIN_RIGHT, readPin(SERIAL_USART_RX_PIN_RIGHT));
-        
-        xprintf("DEBUG: Right side UART pins configured\n");
+    // Add a very long delay at the beginning to ensure console is ready
+    for (int i = 0; i < 20; i++) {
+        wait_ms(100);  // 2 seconds total delay
     }
-
-    xprintf("DEBUG: Keyboard pre-init complete on %s side\n", is_keyboard_master() ? "master" : "slave");
+    
+    // Buffer pre-init logs instead of printing directly
+    append_pre_init_log("\n\n\n");  // Clear line buffer
+    append_pre_init_log("!!!!! CRKBD-PRE-INIT-START !!!!!\n");
+    
+    // Add another delay after initial debug output
+    wait_ms(200);
+    
+    append_pre_init_log("CRKBD-PRE-INIT: Debug enabled\n");
+    
+    // Initialize split detection pin with extra safeguards
+    append_pre_init_log("CRKBD-PRE-INIT: Initializing split hand pin GP21\n");
+    
+    // First, try to reset the pin to a known state
+    setPinOutput_writeLow(SPLIT_HAND_PIN);
+    wait_ms(20);
+    
+    // Then set it as input with pull-up
+    setPinInputHigh_atomic(SPLIT_HAND_PIN);
+    wait_ms(200);  // Longer delay for pin stabilization
+    
+    // Read the pin multiple times to ensure stability
+    uint8_t pin_reads[5] = {0};
+    uint8_t consistent_reads = 0;
+    
+    for (int i = 0; i < 5; i++) {
+        pin_reads[i] = readPin(SPLIT_HAND_PIN);
+        wait_ms(20);
+        
+        // Check if this read matches the previous one
+        if (i > 0 && pin_reads[i] == pin_reads[i-1]) {
+            consistent_reads++;
+        }
+    }
+    
+    // Determine if we have stable readings
+    bool stable_reading = (consistent_reads >= 3);
+    
+    // With SPLIT_HAND_PIN_HIGH_IS_LEFT, HIGH (1) = left side, LOW (0) = right side
+    bool is_left = pin_reads[4] == 1;  // Use the last reading
+    
+    append_pre_init_log("CRKBD-PRE-INIT: Split hand pin readings: %d %d %d %d %d (stable: %d)\n", 
+            pin_reads[0], pin_reads[1], pin_reads[2], pin_reads[3], pin_reads[4], stable_reading);
+    append_pre_init_log("CRKBD-PRE-INIT: Final GP21 state: %d (is_left: %d)\n", pin_reads[4], is_left);
+    
+    if (!stable_reading) {
+        append_pre_init_log("CRKBD-PRE-INIT: WARNING - Unstable split hand pin readings!\n");
+    }
+    
+    // Configure UART pins based on whether we're left or right half
+    append_pre_init_log("CRKBD-PRE-INIT: Configuring as %s half\n", is_left ? "LEFT" : "RIGHT");
+    
+    if (is_left) {
+        // Left side UART configuration
+        append_pre_init_log("CRKBD-PRE-INIT: LEFT half uses TX: GP4, RX: GP5\n");
+        
+        // Configure TX pin (GP4 for left)
+        setPinOutput_writeLow(SERIAL_USART_TX_PIN_LEFT);  // First set LOW
+        wait_ms(20);
+        setPinOutput_writeHigh(SERIAL_USART_TX_PIN_LEFT); // Then set HIGH
+        wait_ms(20);
+        
+        // Configure RX pin (GP5 for left)
+        setPinInputHigh_atomic(SERIAL_USART_RX_PIN_LEFT);
+        wait_ms(20);
+        
+        // Verify pin states
+        uint8_t tx_state = readPin(SERIAL_USART_TX_PIN_LEFT);
+        uint8_t rx_state = readPin(SERIAL_USART_RX_PIN_LEFT);
+        
+        append_pre_init_log("CRKBD-PRE-INIT: LEFT TX pin (GP4) state: %d\n", tx_state);
+        append_pre_init_log("CRKBD-PRE-INIT: LEFT RX pin (GP5) state: %d\n", rx_state);
+        
+        if (tx_state != 1) {
+            append_pre_init_log("CRKBD-PRE-INIT: WARNING - LEFT TX pin not HIGH!\n");
+        }
+    } else {
+        // Right side UART configuration
+        append_pre_init_log("CRKBD-PRE-INIT: RIGHT half uses TX: GP24, RX: GP25\n");
+        
+        // Configure TX pin (GP24 for right)
+        setPinOutput_writeLow(SERIAL_USART_TX_PIN_RIGHT);  // First set LOW
+        wait_ms(20);
+        setPinOutput_writeHigh(SERIAL_USART_TX_PIN_RIGHT); // Then set HIGH
+        wait_ms(20);
+        
+        // Configure RX pin (GP25 for right)
+        setPinInputHigh_atomic(SERIAL_USART_RX_PIN_RIGHT);
+        wait_ms(20);
+        
+        // Verify pin states
+        uint8_t tx_state = readPin(SERIAL_USART_TX_PIN_RIGHT);
+        uint8_t rx_state = readPin(SERIAL_USART_RX_PIN_RIGHT);
+        
+        append_pre_init_log("CRKBD-PRE-INIT: RIGHT TX pin (GP24) state: %d\n", tx_state);
+        append_pre_init_log("CRKBD-PRE-INIT: RIGHT RX pin (GP25) state: %d\n", rx_state);
+        
+        if (tx_state != 1) {
+            append_pre_init_log("CRKBD-PRE-INIT: WARNING - RIGHT TX pin not HIGH!\n");
+        }
+    }
+    
+    append_pre_init_log("CRKBD-PRE-INIT: UART pins configured\n");
+    
+    // Call the user function last
     keyboard_pre_init_user();
 }
 
 void keyboard_post_init_kb(void) {
-    // Add direct console output that doesn't rely on debug_enable
-    xprintf("CRKBD: Console test message from keyboard_post_init_kb\n");
+    // Add distinctive markers
+    xprintf("\n\n\n");  // Clear line buffer
+    xprintf("!!!!! CRKBD-POST-INIT-START !!!!!\n");
     
-    xprintf("DEBUG: Keyboard post-init starting on %s side...\n", is_keyboard_master() ? "master" : "slave");
+    // Add a delay to ensure console is ready
+    wait_ms(100);
     
-    // Add UART pin checking
-    if (is_keyboard_left()) {
-        xprintf("DEBUG: Left side UART pins - TX:GP%d RX:GP%d\n", SERIAL_USART_TX_PIN_LEFT, SERIAL_USART_RX_PIN_LEFT);
-        // Check if pins are configured correctly
-        xprintf("DEBUG: TX pin state: %lu, RX pin state: %lu\n", 
-                readPin(SERIAL_USART_TX_PIN_LEFT), 
-                readPin(SERIAL_USART_RX_PIN_LEFT));
-    } else {
-        xprintf("DEBUG: Right side UART pins - TX:GP%d RX:GP%d\n", SERIAL_USART_TX_PIN_RIGHT, SERIAL_USART_RX_PIN_RIGHT);
-        // Check if pins are configured correctly
-        xprintf("DEBUG: TX pin state: %lu, RX pin state: %lu\n", 
-                readPin(SERIAL_USART_TX_PIN_RIGHT), 
-                readPin(SERIAL_USART_RX_PIN_RIGHT));
+    // Output the buffered pre-init logs
+    if (pre_init_log_pos > 0) {
+        xprintf("%s", pre_init_log_buffer);
+        pre_init_log_pos = 0;  // Reset buffer position
     }
     
+    // Check split hand pin to determine if we're left or right
+    // With SPLIT_HAND_PIN_HIGH_IS_LEFT, HIGH (1) = left side, LOW (0) = right side
+    bool is_left = readPin(SPLIT_HAND_PIN) == 1;
+    xprintf("CRKBD-POST-INIT: Split hand pin GP21 state: %lu (is_left: %d)\n", readPin(SPLIT_HAND_PIN), is_left);
+    
+    // Verify UART pins are properly configured
+    xprintf("CRKBD-POST-INIT: Verifying UART pins\n");
+    
+    if (is_left) {
+        // Verify left side UART pins
+        xprintf("CRKBD-POST-INIT: LEFT TX pin (GP4) state: %lu\n", readPin(SERIAL_USART_TX_PIN_LEFT));
+        xprintf("CRKBD-POST-INIT: LEFT RX pin (GP5) state: %lu\n", readPin(SERIAL_USART_RX_PIN_LEFT));
+        
+        // If TX pin is not HIGH, reset it
+        if (readPin(SERIAL_USART_TX_PIN_LEFT) != 1) {
+            xprintf("CRKBD-POST-INIT: Resetting LEFT TX pin (GP4)\n");
+            setPinOutput_writeHigh(SERIAL_USART_TX_PIN_LEFT);
+        }
+    } else {
+        // Verify right side UART pins
+        xprintf("CRKBD-POST-INIT: RIGHT TX pin (GP24) state: %lu\n", readPin(SERIAL_USART_TX_PIN_RIGHT));
+        xprintf("CRKBD-POST-INIT: RIGHT RX pin (GP25) state: %lu\n", readPin(SERIAL_USART_RX_PIN_RIGHT));
+        
+        // If TX pin is not HIGH, reset it
+        if (readPin(SERIAL_USART_TX_PIN_RIGHT) != 1) {
+            xprintf("CRKBD-POST-INIT: Resetting RIGHT TX pin (GP24)\n");
+            setPinOutput_writeHigh(SERIAL_USART_TX_PIN_RIGHT);
+        }
+    }
+    
+    // Simplify the function to avoid potential freeze points
+    xprintf("CRKBD-POST-INIT: Calling keyboard_post_init_user\n");
+    
+    // Call the user function
     keyboard_post_init_user();
-    xprintf("DEBUG: Keyboard post-init complete on %s side\n", is_keyboard_master() ? "master" : "slave");
 }
 
 void housekeeping_task_kb(void) {
-    // Add direct console output that doesn't rely on debug_enable
-    static uint32_t last_print = 0;
-    if (timer_elapsed32(last_print) > 5000) {  // Print every 5 seconds
-        // Force debug to be enabled using the macro directly
-        debug_enable = true;
-        debug_matrix = true;
-        debug_keyboard = true;
-        
-        xprintf("CRKBD: Console test message from housekeeping_task_kb\n");
-        xprintf("DEBUG: This is a test debug message from housekeeping_task_kb\n");
-        last_print = timer_read32();
+    static uint32_t counter = 0;
+    static uint8_t last_split_pin_state = 255; // Invalid initial value
+    static bool last_is_left = false;
+    static bool first_check_done = false;
+    
+    // Print alive message less frequently to reduce log spam
+    if (counter % 5000 == 0) {
+        xprintf("HOUSEKEEPING-ALIVE: %lu\n", counter);
     }
     
-    // Print debug message every 5 seconds
-    if (timer_elapsed32(last_debug_time) > 5000) {
-        xprintf("DEBUG: Keyboard is alive - %lu ms\n", timer_read32());
-        xprintf("DEBUG: Split hand pin GP%d read: %lu\n", SPLIT_HAND_PIN, readPin(SPLIT_HAND_PIN));
-        xprintf("DEBUG: is_keyboard_left(): %d, is_keyboard_master(): %d\n", 
-                is_keyboard_left(), 
-                is_keyboard_master());
-                
-        // Add UART connection debugging
-        if (is_keyboard_master()) {
-            // Print which UART pins are being used
-            xprintf("DEBUG: Master side UART pins - TX:GP%d RX:GP%d\n", 
-                    is_keyboard_left() ? SERIAL_USART_TX_PIN_LEFT : SERIAL_USART_TX_PIN_RIGHT,
-                    is_keyboard_left() ? SERIAL_USART_RX_PIN_LEFT : SERIAL_USART_RX_PIN_RIGHT);
+    // Check split hand pin and UART pins every 10000 iterations
+    if (counter % 10000 == 0) {
+        // Check split hand pin
+        uint8_t pin_state = readPin(SPLIT_HAND_PIN);
+        bool is_left = pin_state == 1;  // With SPLIT_HAND_PIN_HIGH_IS_LEFT, HIGH (1) = left side, LOW (0) = right side
+        
+        // Only log if this is the first check or if the state has changed
+        if (!first_check_done || pin_state != last_split_pin_state) {
+            xprintf("SPLIT-HAND: Pin GP21 state: %d (is_left: %d)", pin_state, is_left);
             
-            // Check if the other half is connected
-            bool connected = is_transport_connected();
-            xprintf("DEBUG: Split connection status: %d (0=disconnected, 1=connected)\n", connected);
-            
-            // Try to manually check the RX pin state
-            uint8_t rx_pin = is_keyboard_left() ? SERIAL_USART_RX_PIN_LEFT : SERIAL_USART_RX_PIN_RIGHT;
-            xprintf("DEBUG: RX pin (GP%d) current state: %lu\n", rx_pin, readPin(rx_pin));
-            
-            // Try to reinitialize the UART connection if not connected
-            if (!connected) {
-                static uint8_t reconnect_attempts = 0;
-                reconnect_attempts++;
-                
-                xprintf("DEBUG: Right half not detected, trying to reinitialize UART connection (attempt %d)\n", reconnect_attempts);
-                
-                // Get the TX and RX pins
-                uint8_t tx_pin = is_keyboard_left() ? SERIAL_USART_TX_PIN_LEFT : SERIAL_USART_TX_PIN_RIGHT;
-                
-                // Try a more aggressive initialization sequence
-                xprintf("DEBUG: Performing aggressive UART reinitialization\n");
-                
-                // Reset the TX pin with a longer pulse
-                setPinOutput_writeLow(tx_pin);
-                wait_ms(10);
-                setPinOutput_writeHigh(tx_pin);
-                wait_ms(10);
-                setPinOutput_writeLow(tx_pin);
-                wait_ms(10);
-                setPinOutput_writeHigh(tx_pin);
-                
-                // Check if connected now
-                wait_ms(50);  // Wait longer for connection to establish
-                connected = is_transport_connected();
-                xprintf("DEBUG: After reinitialization, connection status: %d\n", connected);
-                
-                if (connected) {
-                    xprintf("DEBUG: Connection established after %d attempts!\n", reconnect_attempts);
-                    reconnect_attempts = 0;
-                }
+            if (first_check_done && pin_state != last_split_pin_state) {
+                xprintf(" - CHANGED from previous state: %d!\n", last_split_pin_state);
             } else {
-                xprintf("DEBUG: Right half is connected!\n");
+                xprintf("\n");
             }
-        } else {
-            // Print which UART pins are being used
-            xprintf("DEBUG: Slave side UART pins - TX:GP%d RX:GP%d\n", 
-                    is_keyboard_left() ? SERIAL_USART_TX_PIN_LEFT : SERIAL_USART_TX_PIN_RIGHT,
-                    is_keyboard_left() ? SERIAL_USART_RX_PIN_LEFT : SERIAL_USART_RX_PIN_RIGHT);
             
-            // Try to manually check the RX pin state
-            uint8_t rx_pin = is_keyboard_left() ? SERIAL_USART_RX_PIN_LEFT : SERIAL_USART_RX_PIN_RIGHT;
-            xprintf("DEBUG: RX pin (GP%d) current state: %lu\n", rx_pin, readPin(rx_pin));
+            // If the left/right status changed, this is a serious issue
+            if (first_check_done && is_left != last_is_left) {
+                xprintf("SPLIT-HAND: WARNING - LEFT/RIGHT STATUS CHANGED! Was: %s, Now: %s\n",
+                        last_is_left ? "LEFT" : "RIGHT", is_left ? "LEFT" : "RIGHT");
+                
+                // Reconfigure UART pins if the side changed
+                if (is_left) {
+                    xprintf("SPLIT-HAND: Reconfiguring as LEFT half\n");
+                    setPinOutput_writeHigh(SERIAL_USART_TX_PIN_LEFT);
+                    setPinInputHigh_atomic(SERIAL_USART_RX_PIN_LEFT);
+                } else {
+                    xprintf("SPLIT-HAND: Reconfiguring as RIGHT half\n");
+                    setPinOutput_writeHigh(SERIAL_USART_TX_PIN_RIGHT);
+                    setPinInputHigh_atomic(SERIAL_USART_RX_PIN_RIGHT);
+                }
+            }
             
-            // Try to send a response signal
-            uint8_t tx_pin = is_keyboard_left() ? SERIAL_USART_TX_PIN_LEFT : SERIAL_USART_TX_PIN_RIGHT;
-            xprintf("DEBUG: Sending response signal on TX pin (GP%d)\n", tx_pin);
-            setPinOutput_writeLow(tx_pin);
-            wait_ms(5);
-            setPinOutput_writeHigh(tx_pin);
-            wait_ms(5);
+            // Update stored state
+            last_split_pin_state = pin_state;
+            last_is_left = is_left;
+            first_check_done = true;
         }
         
-        last_debug_time = timer_read32();
+        // Check UART pin states based on which half we are
+        if (is_left) {
+            // Check left half UART pins
+            uint8_t tx_state = readPin(SERIAL_USART_TX_PIN_LEFT);
+            uint8_t rx_state = readPin(SERIAL_USART_RX_PIN_LEFT);
+            
+            // Only log if there's an issue with the pins
+            if (tx_state != 1 || rx_state != 1) {
+                xprintf("UART-PINS-LEFT: TX (GP4): %d, RX (GP5): %d - NOT IN EXPECTED STATE\n", 
+                        tx_state, rx_state);
+                
+                // If TX pin is not HIGH, reset it
+                if (tx_state != 1) {
+                    xprintf("UART-PINS-LEFT: Resetting TX pin (GP4)\n");
+                    setPinOutput_writeHigh(SERIAL_USART_TX_PIN_LEFT);
+                }
+                
+                // If RX pin is not HIGH (due to pull-up), reset it
+                if (rx_state != 1) {
+                    xprintf("UART-PINS-LEFT: Resetting RX pin (GP5)\n");
+                    setPinInputHigh_atomic(SERIAL_USART_RX_PIN_LEFT);
+                }
+            }
+        } else {
+            // Check right half UART pins
+            uint8_t tx_state = readPin(SERIAL_USART_TX_PIN_RIGHT);
+            uint8_t rx_state = readPin(SERIAL_USART_RX_PIN_RIGHT);
+            
+            // Only log if there's an issue with the pins
+            if (tx_state != 1 || rx_state != 1) {
+                xprintf("UART-PINS-RIGHT: TX (GP24): %d, RX (GP25): %d - NOT IN EXPECTED STATE\n", 
+                        tx_state, rx_state);
+                
+                // If TX pin is not HIGH, reset it
+                if (tx_state != 1) {
+                    xprintf("UART-PINS-RIGHT: Resetting TX pin (GP24)\n");
+                    setPinOutput_writeHigh(SERIAL_USART_TX_PIN_RIGHT);
+                }
+                
+                // If RX pin is not HIGH (due to pull-up), reset it
+                if (rx_state != 1) {
+                    xprintf("UART-PINS-RIGHT: Resetting RX pin (GP25)\n");
+                    setPinInputHigh_atomic(SERIAL_USART_RX_PIN_RIGHT);
+                }
+            }
+        }
     }
+    
+    // Increment counter before any potential freeze point
+    counter++;
+    
+    // Call the user function
+    housekeeping_task_user();
 }
 
 #ifdef OLED_ENABLE

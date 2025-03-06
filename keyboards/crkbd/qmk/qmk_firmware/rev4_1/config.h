@@ -2,47 +2,48 @@
 
 // Hardware pin definitions
 #define USB_VBUS_PIN GP13
-#define SPLIT_HAND_PIN GP21
+#define SPLIT_HAND_PIN GP21  // Determines left/right side
 #define SPLIT_HAND_PIN_HIGH_IS_LEFT  // HIGH = left side, LOW = right side
+// #define MASTER_LEFT
+
+// Add hardware pull-up/pull-down resistor
+#define SPLIT_HAND_PIN_PULLUP_RESISTOR 1000  // Stronger pull-up
 
 // Enable PAL wait functionality for ChibiOS
 #define PAL_USE_WAIT TRUE
 
-// Define soft serial pin - using an unused pin since we're actually using UART
-#define SOFT_SERIAL_PIN GP12
+// Serial driver configuration (using RP2040 UART)
+#define SERIAL_DRIVER SERIAL_DRIVER_VENDOR
+#define SERIAL_USART_FULL_DUPLEX  // Enable full-duplex UART communication
+#define SERIAL_USART_DRIVER SD1   // UART1 (GP4/GP5)
 
 // Define UART pins for split communication
+#define SERIAL_USART_TX_PIN GP4  // Primary UART TX pin
+#define SERIAL_USART_RX_PIN GP5  // Primary UART RX pin
+
+// Alternative UART pins for the right side
 #define SERIAL_USART_TX_PIN_RIGHT GP24
 #define SERIAL_USART_RX_PIN_RIGHT GP25
-#define SERIAL_USART_TX_PIN_LEFT GP4
-#define SERIAL_USART_RX_PIN_LEFT GP5
 
-// Serial driver configuration
-#undef SERIAL_DRIVER
-#define SERIAL_DRIVER SERIAL_DRIVER_VENDOR  // Use vendor driver
-#define SERIAL_USE_MULTI_TRANSACTION
+// Serial configuration
+#define SERIAL_USART_SPEED 115200  // Higher speed for better performance
+#define SERIAL_USART_TX_TIMEOUT 50000
+#define SERIAL_USART_RX_TIMEOUT 50000
 
-// UART configuration for improved reliability
-#define SERIAL_USART_DRIVER SD1  // UART1 matches GP4/GP5
-#define SERIAL_USART_FULL_DUPLEX // Enable full-duplex mode
-#define SERIAL_USART_TX_TIMEOUT 5000 // Much longer timeout for TX
-#define SERIAL_USART_RX_TIMEOUT 5000 // Much longer timeout for RX
+// USB Split Detection Timings
+#define SPLIT_USB_TIMEOUT 10000              // Increased timeout
+#define SPLIT_USB_DETECT_POLL_RATE 100       // More frequent polling
+#define SPLIT_MAX_CONNECTION_ERRORS 10  // More lenient error threshold
+#define SPLIT_CONNECTION_CHECK_INTERVAL 100  // Check connection more frequently
 
-// Try a lower baud rate for more reliable communication
-#define SERIAL_USART_SPEED 9600
-
-
-// Debug configuration
-#define DEBUG_MATRIX_SCAN_RATE
-#define CONSOLE_ENABLE_CDC
-#define SERIAL_DEBUG  // Enable detailed serial debugging
-
-// Force debug to be enabled
-#define DEBUG_ENABLE
-#define NO_DEBUG_DISABLE  // Prevent debug from being disabled
+// Enable serial debugging
+#define SERIAL_DEBUG  
 
 /* RP2040-specific config */
 #define RP2040_BOOTLOADER_DOUBLE_TAP_RESET
 #define RP2040_BOOTLOADER_DOUBLE_TAP_RESET_TIMEOUT 500U
 #define PICO_XOSC_STARTUP_DELAY_MULTIPLIER 64
+
+// Add startup delay to ensure split detection stabilizes
+#define SPLIT_STARTUP_DELAY 2000  // 2 seconds delay at startup
 
